@@ -140,6 +140,37 @@ func (c *SummaryContainer) Get(metricName string, labels prometheus.Labels) prom
 	return summary
 }
 
+type HistogramContainer struct {
+	Elements map[uint64]prometheus.Histogram
+}
+
+func NewHistogramContainer() *HistogramContainer {
+	return &HistogramContainer{
+		Elements: make(map[uint64]prometheus.Histogram),
+	}
+}
+
+func (c *HistogramContainer) Get(metricName string, labels prometheus.Labels) prometheus.Histogram {
+	hash := hashNameAndLabels(metricName, labels)
+	// buckets as prometheus.DefBuckets, multiplied by 1000 to handle milliseconds
+	buckets := []float64{5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
+	histogram, ok := c.Elements[hash]
+	if !ok {
+		histogram = prometheus.NewHistogram(
+			prometheus.HistogramOpts{
+				Name:        metricName,
+				Help:        defaultHelp,
+				ConstLabels: labels,
+				Buckets:     buckets,
+			})
+		c.Elements[hash] = histogram
+		if err := prometheus.Register(histogram); err != nil {
+			log.Fatalf(regErrF, metricName, err)
+		}
+	}
+	return histogram
+}
+
 type Event interface {
 	MetricName() string
 	Value() float64
@@ -172,10 +203,11 @@ func (t *TimerEvent) Value() float64     { return t.value }
 type Events []Event
 
 type Bridge struct {
-	Counters  *CounterContainer
-	Gauges    *GaugeContainer
-	Summaries *SummaryContainer
-	mapper    *metricMapper
+	Counters   *CounterContainer
+	Gauges     *GaugeContainer
+	Summaries  *SummaryContainer
+	Histograms *HistogramContainer
+	mapper     *metricMapper
 }
 
 func escapeMetricName(metricName string) string {
@@ -227,12 +259,23 @@ func (b *Bridge) Listen(e <-chan Events) {
 
 				eventStats.WithLabelValues("gauge").Inc()
 
+			// If we have a timer metric, we need to expose as Summary or Histogram
 			case *TimerEvent:
-				summary := b.Summaries.Get(
-					metricName+"_timer",
-					prometheusLabels,
-				)
-				summary.Observe(event.Value())
+				// TODO: this needs to be defined at metric or runtime
+				useHistogram := true
+				if useHistogram {
+					histogram := b.Histograms.Get(
+						metricName+"_histogram",
+						prometheusLabels,
+					)
+					histogram.Observe(event.Value())
+				} else {
+					summary := b.Summaries.Get(
+						metricName+"_timer",
+						prometheusLabels,
+					)
+					summary.Observe(event.Value())
+				}
 
 				eventStats.WithLabelValues("timer").Inc()
 
@@ -246,10 +289,11 @@ func (b *Bridge) Listen(e <-chan Events) {
 
 func NewBridge(mapper *metricMapper) *Bridge {
 	return &Bridge{
-		Counters:  NewCounterContainer(),
-		Gauges:    NewGaugeContainer(),
-		Summaries: NewSummaryContainer(),
-		mapper:    mapper,
+		Counters:   NewCounterContainer(),
+		Gauges:     NewGaugeContainer(),
+		Summaries:  NewSummaryContainer(),
+		Histograms: NewHistogramContainer(),
+		mapper:     mapper,
 	}
 }
 
