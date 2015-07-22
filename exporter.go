@@ -141,6 +141,37 @@ func (c *SummaryContainer) Get(metricName string, labels prometheus.Labels) prom
 	return summary
 }
 
+type HistogramContainer struct {
+	Elements map[uint64]prometheus.Histogram
+}
+
+func NewHistogramContainer() *HistogramContainer {
+	return &HistogramContainer{
+		Elements: make(map[uint64]prometheus.Histogram),
+	}
+}
+
+func (c *HistogramContainer) Get(metricName string, labels prometheus.Labels) prometheus.Histogram {
+	hash := hashNameAndLabels(metricName, labels)
+	// buckets as prometheus.DefBuckets, multiplied by 1000 to handle milliseconds
+	buckets := []float64{5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
+	histogram, ok := c.Elements[hash]
+	if !ok {
+		histogram = prometheus.NewHistogram(
+			prometheus.HistogramOpts{
+				Name:        metricName,
+				Help:        defaultHelp,
+				ConstLabels: labels,
+				Buckets:     buckets,
+			})
+		c.Elements[hash] = histogram
+		if err := prometheus.Register(histogram); err != nil {
+			log.Fatalf(regErrF, metricName, err)
+		}
+	}
+	return histogram
+}
+
 type Event interface {
 	MetricName() string
 	Value() float64
@@ -180,11 +211,12 @@ func (c *TimerEvent) Labels() map[string]string { return c.labels }
 type Events []Event
 
 type Exporter struct {
-	Counters  *CounterContainer
-	Gauges    *GaugeContainer
-	Summaries *SummaryContainer
-	mapper    *metricMapper
-	addSuffix bool
+	Counters   *CounterContainer
+	Gauges     *GaugeContainer
+	Summaries  *SummaryContainer
+	Histograms *HistogramContainer
+	mapper     *metricMapper
+	addSuffix  bool
 }
 
 func escapeMetricName(metricName string) string {
@@ -256,12 +288,23 @@ func (b *Exporter) Listen(e <-chan Events) {
 
 				eventStats.WithLabelValues("gauge").Inc()
 
+			// If we have a timer metric, we need to expose as Summary or Histogram
 			case *TimerEvent:
-				summary := b.Summaries.Get(
-					b.suffix(metricName, "timer"),
-					prometheusLabels,
-				)
-				summary.Observe(event.Value())
+				// TODO: this needs to be defined at metric or runtime
+				useHistogram := true
+				if useHistogram {
+					histogram := b.Histograms.Get(
+						b.suffix(metricName, "timer"),
+						prometheusLabels,
+					)
+					histogram.Observe(event.Value())
+				} else {
+					summary := b.Summaries.Get(
+						b.suffix(metricName, "timer"),
+						prometheusLabels,
+					)
+					summary.Observe(event.Value())
+				}
 
 				eventStats.WithLabelValues("timer").Inc()
 
@@ -366,7 +409,8 @@ func (l *StatsDListener) handlePacket(packet []byte, e chan<- Events) {
 		} else {
 			samples = strings.Split(elements[1], ":")
 		}
-		samples: for _, sample := range samples {
+	samples:
+		for _, sample := range samples {
 			components := strings.Split(sample, "|")
 			samplingFactor := 1.0
 			if len(components) < 2 || len(components) > 4 {
