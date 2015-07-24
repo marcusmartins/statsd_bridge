@@ -153,7 +153,7 @@ func NewHistogramContainer() *HistogramContainer {
 func (c *HistogramContainer) Get(metricName string, labels prometheus.Labels) prometheus.Histogram {
 	hash := hashNameAndLabels(metricName, labels)
 	// buckets as prometheus.DefBuckets, multiplied by 1000 to handle milliseconds
-	buckets := []float64{5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
+	buckets := []float64{5, 10, 25, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1250, 1500, 1750, 2000, 3000, 5000}
 	histogram, ok := c.Elements[hash]
 	if !ok {
 		histogram = prometheus.NewHistogram(
